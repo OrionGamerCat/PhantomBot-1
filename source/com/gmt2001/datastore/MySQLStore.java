@@ -16,11 +16,11 @@
  */
 package com.gmt2001.datastore;
 
+import com.gmt2001.datastore2.DataStore2;
+import com.gmt2001.datastore2.Transaction;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.sql.DatabaseMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -31,13 +31,8 @@ import java.util.ArrayList;
  */
 public class MySQLStore extends DataStore {
 
-    private static Connection connection = null;
+    private DataStore2 connection = null;
     private static final MySQLStore instance = new MySQLStore();
-
-    private String db = "";
-    private String user = "";
-    private String pass = "";
-    private int autoCommitCtr = 0;
 
     public static MySQLStore instance() {
         return instance;
@@ -55,27 +50,22 @@ public class MySQLStore extends DataStore {
 
     @Override
     public Connection CreateConnection(String db, String user, String pass) {
-        this.db = db;
-        this.user = user;
-        this.pass = pass;
         try {
-            connection = DriverManager.getConnection(db, user, pass);
-            connection.setAutoCommit(getAutoCommitCtr() == 0);
-            com.gmt2001.Console.out.println("Connected to MySQL");
-            return connection;
-        } catch (SQLException ex) {
-            com.gmt2001.Console.err.println("Failure to Connect to MySQL: " + ex.getMessage());
-            return null;
+            DataStore2.init("MySQLStore2", new String[]{db, user, pass});
+        } catch (IllegalStateException | ClassNotFoundException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
         }
+
+        connection = DataStore2.instance();
+
+        return null;
     }
 
     @Override
     protected void finalize() throws Throwable {
         super.finalize();
 
-        if (connection != null && !connection.isClosed()) {
-            connection.close();
-        }
+        connection = null;
     }
 
     private String validateFname(String fName) {
@@ -85,12 +75,8 @@ public class MySQLStore extends DataStore {
     }
 
     private void CheckConnection() {
-        try {
-            if (connection == null || connection.isClosed() || !connection.isValid(10)) {
-                connection = CreateConnection(db, user, pass);
-            }
-        } catch (SQLException ex) {
-            com.gmt2001.Console.err.printStackTrace(ex);
+        if (!connection.connected()) {
+            connection.connect();
         }
     }
 
@@ -122,7 +108,7 @@ public class MySQLStore extends DataStore {
                 statement.setQueryTimeout(10);
                 statement.setString(1, section);
                 statement.setString(2, key);
-                statement.executeUpdate();
+                statement.execute();
             } catch (SQLException ex) {
                 com.gmt2001.Console.err.printStackTrace(ex);
             }
@@ -139,7 +125,7 @@ public class MySQLStore extends DataStore {
             try (PreparedStatement statement = connection.prepareStatement("DELETE FROM phantombot_" + fName + " WHERE section=?;")) {
                 statement.setQueryTimeout(10);
                 statement.setString(1, section);
-                statement.executeUpdate();
+                statement.execute();
             } catch (SQLException ex) {
                 com.gmt2001.Console.err.printStackTrace(ex);
             }
@@ -193,8 +179,7 @@ public class MySQLStore extends DataStore {
         try (Statement statement = connection.createStatement()) {
             statement.setQueryTimeout(10);
 
-            DatabaseMetaData md = connection.getMetaData();
-            try (ResultSet rs = md.getTables(null, null, "phantombot_" + fName, null)) {
+            try (ResultSet rs = statement.executeQuery("SHOW TABLES LIKE 'phantombot_" + fName + "'")) {
                 return rs.next();
             }
         } catch (SQLException ex) {
@@ -211,20 +196,20 @@ public class MySQLStore extends DataStore {
         try (Statement statement = connection.createStatement()) {
             statement.setQueryTimeout(10);
 
-            DatabaseMetaData md = connection.getMetaData();
-            try (ResultSet rs = md.getTables(null, null, "%", null)) {
+            try (ResultSet rs = statement.executeQuery("SHOW TABLES LIKE 'phantombot_%'")) {
                 ArrayList<String> s = new ArrayList<>();
+
                 while (rs.next()) {
-                    s.add(rs.getString(3));
+                    s.add(rs.getString(1).substring(11));
                 }
+
                 return s.toArray(new String[s.size()]);
             }
         } catch (SQLException ex) {
             com.gmt2001.Console.err.printStackTrace(ex);
         }
 
-        return new String[] {
-               };
+        return new String[]{};
     }
 
     @Override
@@ -252,8 +237,7 @@ public class MySQLStore extends DataStore {
             }
         }
 
-        return new String[] {
-               };
+        return new String[]{};
     }
 
     @Override
@@ -301,11 +285,10 @@ public class MySQLStore extends DataStore {
             }
         }
 
-        return new String[] {
-               };
+        return new String[]{};
     }
 
-     @Override
+    @Override
     public String[] GetKeysByOrder(String fName, String section, String order, String limit, String offset) {
         CheckConnection();
 
@@ -316,15 +299,15 @@ public class MySQLStore extends DataStore {
                 try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE section=? ORDER BY variable " + order + " LIMIT " + limit + ", " + offset + ";")) {
                     statement.setQueryTimeout(10);
                     statement.setString(1, section);
-    
+
                     try (ResultSet rs = statement.executeQuery()) {
-    
+
                         ArrayList<String> s = new ArrayList<>();
-    
+
                         while (rs.next()) {
                             s.add(rs.getString("variable"));
                         }
-    
+
                         return s.toArray(new String[s.size()]);
                     }
                 } catch (SQLException ex) {
@@ -350,8 +333,7 @@ public class MySQLStore extends DataStore {
             }
         }
 
-        return new String[] {
-               };
+        return new String[]{};
     }
 
     @Override
@@ -370,7 +352,7 @@ public class MySQLStore extends DataStore {
                     try (ResultSet rs = statement.executeQuery()) {
                         ArrayList<String> s = new ArrayList<>();
 
-                        while(rs.next()) {
+                        while (rs.next()) {
                             s.add(rs.getString("variable"));
                         }
                         return s.toArray(new String[s.size()]);
@@ -386,7 +368,7 @@ public class MySQLStore extends DataStore {
                     try (ResultSet rs = statement.executeQuery()) {
                         ArrayList<String> s = new ArrayList<>();
 
-                        while(rs.next()) {
+                        while (rs.next()) {
                             s.add(rs.getString("variable"));
                         }
                         return s.toArray(new String[s.size()]);
@@ -399,8 +381,7 @@ public class MySQLStore extends DataStore {
             }
         }
 
-        return new String[] {
-               };
+        return new String[]{};
     }
 
     @Override
@@ -419,7 +400,7 @@ public class MySQLStore extends DataStore {
                     try (ResultSet rs = statement.executeQuery()) {
                         ArrayList<String> s = new ArrayList<>();
 
-                        while(rs.next()) {
+                        while (rs.next()) {
                             s.add(rs.getString("variable"));
                         }
                         return s.toArray(new String[s.size()]);
@@ -428,14 +409,14 @@ public class MySQLStore extends DataStore {
                     com.gmt2001.Console.err.printStackTrace(ex);
                 }
             } else {
-                try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE variable LIKE '%?%';")) {
+                try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE variable LIKE ?;")) {
                     statement.setQueryTimeout(10);
-                    statement.setString(1, search);
+                    statement.setString(1, "%" + search + "%");
 
                     try (ResultSet rs = statement.executeQuery()) {
                         ArrayList<String> s = new ArrayList<>();
 
-                        while(rs.next()) {
+                        while (rs.next()) {
                             s.add(rs.getString("variable"));
                         }
                         return s.toArray(new String[s.size()]);
@@ -448,27 +429,26 @@ public class MySQLStore extends DataStore {
             }
         }
 
-        return new String[] {
-               };
+        return new String[]{};
     }
 
-     @Override
+    @Override
     public String[] GetKeysByLikeKeysOrder(String fName, String section, String search, String order, String limit, String offset) {
         CheckConnection();
 
         fName = validateFname(fName);
 
-        if (FileExists(fName)) { 
+        if (FileExists(fName)) {
             if (section.length() > 0) {
                 try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE section=? AND variable LIKE ? ORDER BY variable " + order + " LIMIT " + limit + ", " + offset + ";")) {
                     statement.setQueryTimeout(10);
                     statement.setString(1, section);
                     statement.setString(2, "%" + search + "%");
-                    
+
                     try (ResultSet rs = statement.executeQuery()) {
                         ArrayList<String> s = new ArrayList<>();
-                        
-                        while(rs.next()) {
+
+                        while (rs.next()) {
                             s.add(rs.getString("variable"));
                         }
                         return s.toArray(new String[s.size()]);
@@ -480,11 +460,11 @@ public class MySQLStore extends DataStore {
                 try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE variable LIKE ? ORDER BY variable " + order + " LIMIT " + limit + ", " + offset + ";")) {
                     statement.setQueryTimeout(10);
                     statement.setString(1, "%" + search + "%");
-                    
+
                     try (ResultSet rs = statement.executeQuery()) {
                         ArrayList<String> s = new ArrayList<>();
-                        
-                        while(rs.next()) {
+
+                        while (rs.next()) {
                             s.add(rs.getString("variable"));
                         }
                         return s.toArray(new String[s.size()]);
@@ -497,8 +477,7 @@ public class MySQLStore extends DataStore {
             }
         }
 
-        return new String[] {
-               };
+        return new String[]{};
     }
 
     @Override
@@ -526,7 +505,7 @@ public class MySQLStore extends DataStore {
             } catch (SQLException ex) {
                 com.gmt2001.Console.err.printStackTrace(ex);
             }
-       } else {
+        } else {
             try (PreparedStatement statement = connection.prepareStatement("SELECT value FROM phantombot_" + fName + " WHERE variable=?;")) {
                 statement.setQueryTimeout(10);
                 statement.setString(1, key);
@@ -598,32 +577,20 @@ public class MySQLStore extends DataStore {
         fName = validateFname(fName);
         AddFile(fName);
 
-        setAutoCommit(false);
-
         try {
-            try (PreparedStatement statement = connection.prepareStatement("REPLACE INTO phantombot_" + fName + " (value, section, variable) values(?, ?, ?);")) {
+            try (PreparedStatement statement = transaction.prepareStatement("REPLACE INTO phantombot_" + fName + " (value, section, variable) values(?, ?, ?);")) {
                 statement.setQueryTimeout(10);
                 for (int idx = 0; idx < keys.length; idx++) {
                     statement.setString(1, values[idx]);
                     statement.setString(2, section);
                     statement.setString(3, keys[idx]);
                     statement.addBatch();
-
-                    if (idx % 500 == 0) {
-                        statement.executeBatch();
-                        statement.clearBatch();
-                    }
                 }
-                statement.executeBatch();
-                statement.clearBatch();
-                connection.commit();
             }
         } catch (SQLException ex) {
             com.gmt2001.Console.err.println(ex);
             com.gmt2001.Console.err.printStackTrace(ex);
         }
-
-        setAutoCommit(true);
     }
 
     @Override
@@ -641,7 +608,7 @@ public class MySQLStore extends DataStore {
                     statement.setString(1, value);
                     statement.setString(2, section);
                     statement.setString(3, key);
-                    statement.executeUpdate();
+                    commit();
                 }
             } else {
                 try (PreparedStatement statement = connection.prepareStatement("INSERT INTO phantombot_" + fName + " values(?, ?, ?);")) {
@@ -649,7 +616,7 @@ public class MySQLStore extends DataStore {
                     statement.setString(1, section);
                     statement.setString(2, key);
                     statement.setString(3, value);
-                    statement.executeUpdate();
+                    commit();
                 }
             }
         } catch (SQLException ex) {
@@ -676,20 +643,21 @@ public class MySQLStore extends DataStore {
     public void setAutoCommit(boolean mode) {
         CheckConnection();
 
-        try {
-            if (mode == true) {
-                decrAutoCommitCtr();
-                if (getAutoCommitCtr() == 0) {
-                    connection.commit();
-                    connection.setAutoCommit(mode);
-                }
-            } else {
-                incrAutoCommitCtr();
-                connection.setAutoCommit(mode);
-                com.gmt2001.Console.debug.println(getAutoCommitCtr());
+        if (mode == true) {
+            decrAutoCommitCtr();
+            commit();
+        } else {
+            incrAutoCommitCtr();
+        }
+    }
+
+    private synchronized void commit() {
+        if (getAutoCommitCtr() <= 0) {
+            try {
+                transaction.execute();
+            } catch (SQLException ex) {
+                com.gmt2001.Console.err.printStackTrace(ex);
             }
-        } catch (SQLException ex) {
-            com.gmt2001.Console.debug.println("MySQL commit was attempted too early, will perform later.");
         }
     }
 
@@ -697,7 +665,9 @@ public class MySQLStore extends DataStore {
         autoCommitCtr++;
     }
     private synchronized void decrAutoCommitCtr() {
-        autoCommitCtr--;
+        if (autoCommitCtr > 0) {
+            autoCommitCtr--;
+        }
     }
     private synchronized int getAutoCommitCtr() {
         return autoCommitCtr;
