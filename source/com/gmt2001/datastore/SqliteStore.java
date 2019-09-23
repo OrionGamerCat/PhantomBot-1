@@ -16,21 +16,24 @@
  */
 package com.gmt2001.datastore;
 
+import biz.source_code.miniConnectionPoolManager.MiniConnectionPoolManager;
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.Charset;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Paths;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
-import java.util.Map;
 import java.util.HashMap;
-import java.util.concurrent.BlockingDeque;
-import java.util.concurrent.LinkedBlockingDeque;
+import java.util.Map;
 import org.apache.commons.io.FileUtils;
 import org.sqlite.SQLiteConfig;
+import org.sqlite.javax.SQLiteConnectionPoolDataSource;
 
 /**
  *
@@ -38,48 +41,52 @@ import org.sqlite.SQLiteConfig;
  */
 public class SqliteStore extends DataStore {
 
-    private String dbname = "config/phantombot.db";
-    private int cache_size = -50000;
-    private boolean safe_write = false;
-    private boolean journal = true;
-    private static final SqliteStore instance = new SqliteStore();
-    private static final WriteQueue writequeue = new WriteQueue();
+    private static final int MAX_CONNECTIONS = 30;
+    private static SqliteStore instance;
+    private final MiniConnectionPoolManager poolMgr;
 
     public static SqliteStore instance() {
+        return instance("");
+    }
+
+    public static SqliteStore instance(String configStr) {
+        if (instance == null) {
+            instance = new SqliteStore(configStr);
+        }
+
         return instance;
     }
 
-    private SqliteStore() {
+    private SqliteStore(String configStr) {
         try {
             Class.forName("org.sqlite.JDBC");
         } catch (ClassNotFoundException ex) {
             com.gmt2001.Console.err.printStackTrace(ex);
         }
 
-        Object o[] = LoadConfigReal("");
+        Object o[] = LoadConfigReal(configStr);
 
-        dbname = (String) o[0];
-        cache_size = (int) o[1];
-        safe_write = (boolean) o[2];
-        journal = (boolean) o[3];
+        SQLiteConfig config = new SQLiteConfig();
+        config.setCacheSize((int) o[1]);
+        config.setSynchronous((boolean) o[2] ? SQLiteConfig.SynchronousMode.FULL : SQLiteConfig.SynchronousMode.NORMAL);
+        config.setTempStore(SQLiteConfig.TempStore.MEMORY);
+        config.setJournalMode((boolean) o[3] ? SQLiteConfig.JournalMode.WAL : SQLiteConfig.JournalMode.OFF);
+        config.setBusyTimeout(10000);
+
+        SQLiteConnectionPoolDataSource dataSource = new SQLiteConnectionPoolDataSource(config);
+        dataSource.setUrl("jdbc:sqlite:" + ((String) o[0]).replaceAll("\\\\", "/"));
+        poolMgr = new MiniConnectionPoolManager(dataSource, MAX_CONNECTIONS);
     }
 
     private String sanitizeOrder(String order) {
-        if (order.equalsIgnoreCase("ASC")) {
-            return "ASC";
-        }
-        return "DESC";
+        return order.equalsIgnoreCase("ASC") ? "ASC" : "DESC";
     }
 
     private String sanitizeLimit(String limit) {
         try {
             int intValue = Integer.parseInt(limit);
             return String.valueOf(intValue);
-        } catch (NumberFormatException ex) {
-            return String.valueOf(Integer.MAX_VALUE);
-        } catch (NullPointerException ex) {
-            return String.valueOf(Integer.MAX_VALUE);
-        } catch (Exception ex) {
+        } catch (NumberFormatException | NullPointerException ex) {
             return String.valueOf(Integer.MAX_VALUE);
         }
     }
@@ -88,23 +95,13 @@ public class SqliteStore extends DataStore {
         try {
             int intValue = Integer.parseInt(offset);
             return String.valueOf(intValue);
-        } catch (NumberFormatException ex) {
-            return "0";
-        } catch (NullPointerException ex) {
-            return "0";
-        } catch (Exception ex) {
+        } catch (NumberFormatException | NullPointerException ex) {
             return "0";
         }
     }
 
-    @Override
-    public void LoadConfig(String configStr) {
-        Object o[] = LoadConfigReal(configStr);
-
-        dbname = (String) o[0];
-        cache_size = (int) o[1];
-        safe_write = (boolean) o[2];
-        journal = (boolean) o[3];
+    public static boolean hasDatabase(String configStr) {
+        return Files.exists(Paths.get((String) LoadConfigReal(configStr)[0]), LinkOption.NOFOLLOW_LINKS);
     }
 
     private static Object[] LoadConfigReal(String configStr) {
@@ -116,30 +113,23 @@ public class SqliteStore extends DataStore {
         int cache_size = -50000;
         boolean safe_write = false;
         boolean journal = true;
-        boolean use_indexes = false;
 
         try {
             File f = new File("./" + configStr);
 
             if (f.exists()) {
-                String data = FileUtils.readFileToString(new File("./" + configStr));
+                String data = FileUtils.readFileToString(new File("./" + configStr), Charset.defaultCharset());
                 String[] lines = data.replaceAll("\\r", "").split("\\n");
 
                 for (String line : lines) {
                     if (line.startsWith("dbname=") && line.length() > 8) {
                         dbname = line.substring(7);
-                    }
-                    if (line.startsWith("cachesize=") && line.length() > 11) {
+                    } else if (line.startsWith("cachesize=") && line.length() > 11) {
                         cache_size = Integer.parseInt(line.substring(10));
-                    }
-                    if (line.startsWith("safewrite=") && line.length() > 11) {
+                    } else if (line.startsWith("safewrite=") && line.length() > 11) {
                         safe_write = line.substring(10).equalsIgnoreCase("true") || line.substring(10).equalsIgnoreCase("1");
-                    }
-                    if (line.startsWith("journal=") && line.length() > 9) {
-                        journal = line.substring(8).equalsIgnoreCase("true");
-                    }
-                    if (line.startsWith("useindex=") && line.length() > 10) {
-                        use_indexes = line.substring(9).equalsIgnoreCase("true");
+                    } else if (line.startsWith("journal=") && line.length() > 9) {
+                        journal = line.substring(8).equalsIgnoreCase("true") || line.substring(10).equalsIgnoreCase("1");
                     }
                 }
             }
@@ -147,50 +137,9 @@ public class SqliteStore extends DataStore {
             com.gmt2001.Console.err.printStackTrace(ex);
         }
 
-        return new Object[] {
-                   dbname, cache_size, safe_write, journal, use_indexes
-               };
-    }
-
-    private static Connection CreateConnection(String dbname, int cache_size, boolean safe_write, boolean journal, boolean autocommit) {
-        Connection connection = null;
-        
-        if (!writequeue.isRunning) {
-            writequeue.start();
-        }
-
-        try {
-            SQLiteConfig config = new SQLiteConfig();
-            config.setCacheSize(cache_size);
-            config.setSynchronous(safe_write ? SQLiteConfig.SynchronousMode.FULL : SQLiteConfig.SynchronousMode.NORMAL);
-            config.setTempStore(SQLiteConfig.TempStore.MEMORY);
-            config.setJournalMode(journal ? SQLiteConfig.JournalMode.WAL : SQLiteConfig.JournalMode.OFF);
-            config.setBusyTimeout(10000);
-            connection = DriverManager.getConnection("jdbc:sqlite:" + dbname.replaceAll("\\\\", "/"), config.toProperties());
-            connection.setAutoCommit(autocommit);
-        } catch (SQLException ex) {
-            com.gmt2001.Console.err.printStackTrace(ex);
-        }
-
-        return connection;
-    }
-
-    public void CloseConnection(Connection connection) {
-        try {
-            if (connection != null) {
-                connection.close();
-                connection = null;
-            }
-        } catch (SQLException ex) {
-            com.gmt2001.Console.err.printStackTrace(ex);
-        }
-    }
-
-    @Override
-    protected void finalize() throws Throwable {
-        super.finalize();
-
-        writequeue.kill();
+        return new Object[]{
+            dbname, cache_size, safe_write, journal
+        };
     }
 
     private String validateFname(String fName) {
@@ -200,21 +149,32 @@ public class SqliteStore extends DataStore {
     }
 
     private Connection GetConnection() {
-        return CreateConnection(dbname, cache_size, safe_write, journal, true);
+        try {
+            return poolMgr.getConnection();
+        } catch (SQLException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
+        }
+
+        return null;
     }
 
     @Override
     public void AddFile(String fName) {
-        Connection connection = GetConnection();
+        try (Connection connection = GetConnection()) {
+            AddFile(connection, fName);
+        } catch (SQLException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
+        }
+    }
 
+    public void AddFile(Connection connection, String fName) {
         fName = validateFname(fName);
 
-        if (!FileExists(fName)) {
-            try {
-                Statement statement = connection.createStatement();
+        if (!FileExists(connection, fName)) {
+            try (Statement statement = connection.createStatement()) {
                 statement.addBatch("CREATE TABLE IF NOT EXISTS phantombot_" + fName + " (section string, variable string, value string);");
                 statement.addBatch("CREATE UNIQUE INDEX IF NOT EXISTS " + fName + "_idx on phantombot_" + fName + " (section, variable);");
-                writequeue.block(statement, connection);
+                statement.executeBatch();
             } catch (SQLException ex) {
                 com.gmt2001.Console.err.printStackTrace(ex);
             }
@@ -223,75 +183,70 @@ public class SqliteStore extends DataStore {
 
     @Override
     public void RemoveKey(String fName, String section, String key) {
-        Connection connection = GetConnection();
+        try (Connection connection = GetConnection()) {
+            fName = validateFname(fName);
 
-        fName = validateFname(fName);
-
-        if (FileExists(fName)) {
-            try {
-                PreparedStatement statement = connection.prepareStatement("DELETE FROM phantombot_" + fName + " WHERE section=? AND variable=?;");
-                statement.setString(1, section);
-                statement.setString(2, key);
-                statement.addBatch();
-                writequeue.enqueue(statement, connection);
-            } catch (SQLException ex) {
-                com.gmt2001.Console.err.printStackTrace(ex);
+            if (FileExists(connection, fName)) {
+                try (PreparedStatement statement = connection.prepareStatement("DELETE FROM phantombot_" + fName + " WHERE section=? AND variable=?;")) {
+                    statement.setString(1, section);
+                    statement.setString(2, key);
+                    statement.execute();
+                }
             }
+        } catch (SQLException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
         }
     }
 
     @Override
     public void RemoveSection(String fName, String section) {
-        Connection connection = GetConnection();
+        try (Connection connection = GetConnection()) {
+            fName = validateFname(fName);
 
-        fName = validateFname(fName);
-
-        if (FileExists(fName)) {
-            try {
-                PreparedStatement statement = connection.prepareStatement("DELETE FROM phantombot_" + fName + " WHERE section=?;");
-                statement.setString(1, section);
-                statement.addBatch();
-                writequeue.enqueue(statement, connection);
-            } catch (SQLException ex) {
-                com.gmt2001.Console.err.printStackTrace(ex);
+            if (FileExists(connection, fName)) {
+                try (PreparedStatement statement = connection.prepareStatement("DELETE FROM phantombot_" + fName + " WHERE section=?;")) {
+                    statement.setString(1, section);
+                    statement.execute();
+                }
             }
+        } catch (SQLException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
         }
     }
 
     @Override
     public void RemoveFile(String fName) {
-        Connection connection = GetConnection();
+        try (Connection connection = GetConnection()) {
+            fName = validateFname(fName);
 
-        fName = validateFname(fName);
-
-        if (FileExists(fName)) {
-            try {
-                Statement statement = connection.createStatement();
-                statement.addBatch("DROP TABLE phantombot_" + fName + ";");
-                writequeue.block(statement, connection);
-            } catch (SQLException ex) {
-                com.gmt2001.Console.err.printStackTrace(ex);
+            if (FileExists(connection, fName)) {
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute("DROP TABLE phantombot_" + fName + ";");
+                }
             }
+        } catch (SQLException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
         }
     }
 
     @Override
     public void RenameFile(String fNameSource, String fNameDest) {
-        Connection connection = GetConnection();
+        try (Connection connection = GetConnection()) {
+            fNameSource = validateFname(fNameSource);
+            fNameDest = validateFname(fNameDest);
 
-        fNameSource = validateFname(fNameSource);
-        fNameDest = validateFname(fNameDest);
+            if (!FileExists(connection, fNameSource)) {
+                return;
+            }
 
-        if (!FileExists(fNameSource)) {
-            return;
-        }
+            try (Statement statement = connection.createStatement()) {
 
-        RemoveFile(fNameDest);
+                if (FileExists(connection, fNameDest)) {
+                    statement.execute("DROP TABLE phantombot_" + fNameDest + ";");
+                }
 
-        try {
-            Statement statement = connection.createStatement();
-            statement.addBatch("ALTER TABLE phantombot_" + fNameSource + " RENAME TO phantombot_" + fNameDest + ";");
-            writequeue.block(statement, connection);
+                statement.execute("ALTER TABLE phantombot_" + fNameSource + " RENAME TO phantombot_" + fNameDest + ";");
+            }
         } catch (SQLException ex) {
             com.gmt2001.Console.err.printStackTrace(ex);
         }
@@ -299,23 +254,28 @@ public class SqliteStore extends DataStore {
 
     @Override
     public boolean FileExists(String fName) {
-        Connection connection = GetConnection();
+        boolean out = false;
 
+        try (Connection connection = GetConnection()) {
+            out = FileExists(connection, fName);
+        } catch (SQLException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
+        }
+
+        return out;
+    }
+
+    public boolean FileExists(Connection connection, String fName) {
         fName = validateFname(fName);
 
         boolean out = false;
+
         try (Statement statement = connection.createStatement()) {
             try (ResultSet rs = statement.executeQuery("SELECT name FROM sqlite_master WHERE type='table' AND name='phantombot_" + fName + "';")) {
                 out = rs.next();
             }
         } catch (SQLException ex) {
             com.gmt2001.Console.err.printStackTrace(ex);
-        } finally {
-            try {
-                connection.close();
-            } catch (SQLException ex) {
-                com.gmt2001.Console.err.printStackTrace(ex);
-            }
         }
 
         return out;
@@ -323,29 +283,23 @@ public class SqliteStore extends DataStore {
 
     @Override
     public String[] GetFileList() {
-        Connection connection = GetConnection();
-        String[] out = new String[] {
-               };
+        String[] out = new String[]{};
 
-        try (Statement statement = connection.createStatement()) {
-            try (ResultSet rs = statement.executeQuery("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'phantombot_%';")) {
+        try (Connection connection = GetConnection()) {
+            try (Statement statement = connection.createStatement()) {
+                try (ResultSet rs = statement.executeQuery("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'phantombot_%';")) {
 
-                ArrayList<String> s = new ArrayList<String>();
+                    ArrayList<String> s = new ArrayList<>();
 
-                while (rs.next()) {
-                    s.add(rs.getString("name").substring(11));
+                    while (rs.next()) {
+                        s.add(rs.getString("name").substring(11));
+                    }
+
+                    out = s.toArray(new String[s.size()]);
                 }
-
-                out =  s.toArray(new String[s.size()]);
             }
         } catch (SQLException ex) {
             com.gmt2001.Console.err.printStackTrace(ex);
-        } finally {
-            try {
-                connection.close();
-            } catch (SQLException ex) {
-                com.gmt2001.Console.err.printStackTrace(ex);
-            }
         }
 
         return out;
@@ -353,34 +307,27 @@ public class SqliteStore extends DataStore {
 
     @Override
     public String[] GetCategoryList(String fName) {
-        Connection connection = GetConnection();
+        String[] out = new String[]{};
 
-        fName = validateFname(fName);
+        try (Connection connection = GetConnection()) {
+            fName = validateFname(fName);
 
-        String[] out = new String[] {
-               };
-        
-        if (FileExists(fName)) {
-            try (Statement statement = connection.createStatement()) {
-                try (ResultSet rs = statement.executeQuery("SELECT section FROM phantombot_" + fName + " GROUP BY section;")) {
+            if (FileExists(connection, fName)) {
+                try (Statement statement = connection.createStatement()) {
+                    try (ResultSet rs = statement.executeQuery("SELECT section FROM phantombot_" + fName + " GROUP BY section;")) {
 
-                    ArrayList<String> s = new ArrayList<String>();
+                        ArrayList<String> s = new ArrayList<>();
 
-                    while (rs.next()) {
-                        s.add(rs.getString("section"));
+                        while (rs.next()) {
+                            s.add(rs.getString("section"));
+                        }
+
+                        out = s.toArray(new String[s.size()]);
                     }
-
-                    out = s.toArray(new String[s.size()]);
-                }
-            } catch (SQLException ex) {
-                com.gmt2001.Console.err.printStackTrace(ex);
-            } finally {
-                try {
-                    connection.close();
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
                 }
             }
+        } catch (SQLException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
         }
 
         return out;
@@ -388,59 +335,44 @@ public class SqliteStore extends DataStore {
 
     @Override
     public String[] GetKeyList(String fName, String section) {
-        Connection connection = GetConnection();
+        String[] out = new String[]{};
 
-        fName = validateFname(fName);
-        
-        String[] out = new String[] {
-               };
+        try (Connection connection = GetConnection()) {
+            fName = validateFname(fName);
 
-        if (FileExists(fName)) {
-            if (section != null) {
-                try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE section=?;")) {
-                    statement.setString(1, section);
+            if (FileExists(connection, fName)) {
+                if (section != null) {
+                    try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE section=?;")) {
+                        statement.setString(1, section);
 
-                    try (ResultSet rs = statement.executeQuery()) {
+                        try (ResultSet rs = statement.executeQuery()) {
 
-                        ArrayList<String> s = new ArrayList<String>();
+                            ArrayList<String> s = new ArrayList<>();
 
-                        while (rs.next()) {
-                            s.add(rs.getString("variable"));
+                            while (rs.next()) {
+                                s.add(rs.getString("variable"));
+                            }
+
+                            out = s.toArray(new String[s.size()]);
                         }
-
-                        out = s.toArray(new String[s.size()]);
                     }
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                } finally {
-                    try {
-                        connection.close();
-                    } catch (SQLException ex) {
-                        com.gmt2001.Console.err.printStackTrace(ex);
-                    }
-                }
-            } else {
-                try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + ";")) {
-                    try (ResultSet rs = statement.executeQuery()) {
+                } else {
+                    try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + ";")) {
+                        try (ResultSet rs = statement.executeQuery()) {
 
-                        ArrayList<String> s = new ArrayList<String>();
+                            ArrayList<String> s = new ArrayList<>();
 
-                        while (rs.next()) {
-                            s.add(rs.getString("variable"));
+                            while (rs.next()) {
+                                s.add(rs.getString("variable"));
+                            }
+
+                            out = s.toArray(new String[s.size()]);
                         }
-
-                        out = s.toArray(new String[s.size()]);
-                    }
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                } finally {
-                    try {
-                        connection.close();
-                    } catch (SQLException ex) {
-                        com.gmt2001.Console.err.printStackTrace(ex);
                     }
                 }
             }
+        } catch (SQLException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
         }
 
         return out;
@@ -448,56 +380,43 @@ public class SqliteStore extends DataStore {
 
     @Override
     public KeyValue[] GetKeyValueList(String fName, String section) {
-        Connection connection = GetConnection();
-        fName = validateFname(fName);
+        KeyValue[] out = new KeyValue[]{};
 
-        KeyValue[] out = new KeyValue[] {};
-        
-        if (FileExists(fName)) {
-            if (section != null) {
-                try (PreparedStatement statement = connection.prepareStatement("SELECT variable, value FROM phantombot_" + fName + " WHERE section=?;")) {
-                    statement.setString(1, section);
+        try (Connection connection = GetConnection()) {
+            fName = validateFname(fName);
 
-                    try (ResultSet rs = statement.executeQuery()) {
-                        ArrayList<KeyValue> s = new ArrayList<KeyValue>();
+            if (FileExists(connection, fName)) {
+                if (section != null) {
+                    try (PreparedStatement statement = connection.prepareStatement("SELECT variable, value FROM phantombot_" + fName + " WHERE section=?;")) {
+                        statement.setString(1, section);
 
-                        while (rs.next()) {
-                            s.add(new KeyValue(rs.getString("variable"), rs.getString("value")));
+                        try (ResultSet rs = statement.executeQuery()) {
+                            ArrayList<KeyValue> s = new ArrayList<>();
+
+                            while (rs.next()) {
+                                s.add(new KeyValue(rs.getString("variable"), rs.getString("value")));
+                            }
+
+                            out = s.toArray(new KeyValue[s.size()]);
                         }
-
-                        out = s.toArray(new KeyValue[s.size()]);
                     }
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                } finally {
-                    try {
-                        connection.close();
-                    } catch (SQLException ex) {
-                        com.gmt2001.Console.err.printStackTrace(ex);
-                    }
-                }
-            } else {
-                try (PreparedStatement statement = connection.prepareStatement("SELECT variable, value FROM phantombot_" + fName + ";")) {
-                    try (ResultSet rs = statement.executeQuery()) {
+                } else {
+                    try (PreparedStatement statement = connection.prepareStatement("SELECT variable, value FROM phantombot_" + fName + ";")) {
+                        try (ResultSet rs = statement.executeQuery()) {
 
-                        ArrayList<KeyValue> s = new ArrayList<KeyValue>();
+                            ArrayList<KeyValue> s = new ArrayList<>();
 
-                        while (rs.next()) {
-                            s.add(new KeyValue(rs.getString("variable"), rs.getString("value")));
+                            while (rs.next()) {
+                                s.add(new KeyValue(rs.getString("variable"), rs.getString("value")));
+                            }
+
+                            out = s.toArray(new KeyValue[s.size()]);
                         }
-
-                        out = s.toArray(new KeyValue[s.size()]);
-                    }
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                } finally {
-                    try {
-                        connection.close();
-                    } catch (SQLException ex) {
-                        com.gmt2001.Console.err.printStackTrace(ex);
                     }
                 }
             }
+        } catch (SQLException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
         }
 
         return out;
@@ -514,72 +433,58 @@ public class SqliteStore extends DataStore {
     }
 
     private String[] GetKeysByOrderInternal(String fName, String section, String order, String limit, String offset, boolean isNumber) {
-        Connection connection = GetConnection();
-        String statementStr;
-        fName = validateFname(fName);
-        order = sanitizeOrder(order);
-        limit = sanitizeLimit(limit);
-        offset = sanitizeOffset(offset);
+        String[] out = new String[]{};
 
-        String[] out = new String[] {
-               };
-        
-        if (FileExists(fName)) {
-            if (section != null) {
-                if (isNumber) {
-                    statementStr = "SELECT variable FROM phantombot_" + fName + " WHERE section=? ORDER BY CAST(variable as INTEGER) COLLATE NOCASE " + order + " LIMIT " + limit + " OFFSET " + offset + ";";
-                } else {
-                    statementStr = "SELECT variable FROM phantombot_" + fName + " WHERE section=? ORDER BY variable COLLATE NOCASE " + order + " LIMIT " + limit + " OFFSET " + offset + ";";
-                }
-                try (PreparedStatement statement = connection.prepareStatement(statementStr)) {
-                    statement.setString(1, section);
+        try (Connection connection = GetConnection()) {
+            String statementStr;
+            fName = validateFname(fName);
+            order = sanitizeOrder(order);
+            limit = sanitizeLimit(limit);
+            offset = sanitizeOffset(offset);
 
-                    try (ResultSet rs = statement.executeQuery()) {
+            if (FileExists(connection, fName)) {
+                if (section != null) {
+                    if (isNumber) {
+                        statementStr = "SELECT variable FROM phantombot_" + fName + " WHERE section=? ORDER BY CAST(variable as INTEGER) COLLATE NOCASE " + order + " LIMIT " + limit + " OFFSET " + offset + ";";
+                    } else {
+                        statementStr = "SELECT variable FROM phantombot_" + fName + " WHERE section=? ORDER BY variable COLLATE NOCASE " + order + " LIMIT " + limit + " OFFSET " + offset + ";";
+                    }
+                    try (PreparedStatement statement = connection.prepareStatement(statementStr)) {
+                        statement.setString(1, section);
 
-                        ArrayList<String> s = new ArrayList<String>();
+                        try (ResultSet rs = statement.executeQuery()) {
 
-                        while (rs.next()) {
-                            s.add(rs.getString("variable"));
+                            ArrayList<String> s = new ArrayList<>();
+
+                            while (rs.next()) {
+                                s.add(rs.getString("variable"));
+                            }
+
+                            out = s.toArray(new String[s.size()]);
                         }
-
-                        out = s.toArray(new String[s.size()]);
                     }
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                } finally {
-                    try {
-                        connection.close();
-                    } catch (SQLException ex) {
-                        com.gmt2001.Console.err.printStackTrace(ex);
-                    }
-                }
-            } else {
-                if (isNumber) {
-                    statementStr = "SELECT variable FROM phantombot_" + fName + " ORDER BY CAST(variable as INTEGER) COLLATE NOCASE " + order + " LIMIT " + limit + " OFFSET " + offset + ";";
                 } else {
-                    statementStr = "SELECT variable FROM phantombot_" + fName + " ORDER BY variable COLLATE NOCASE " + order + " LIMIT " + limit + " OFFSET " + offset + ";";
-                }
-                try (PreparedStatement statement = connection.prepareStatement(statementStr)) {
-                    try (ResultSet rs = statement.executeQuery()) {
-
-                        ArrayList<String> s = new ArrayList<String>();
-
-                        while (rs.next()) {
-                            s.add(rs.getString("variable"));
-                        }
-
-                        out = s.toArray(new String[s.size()]);
+                    if (isNumber) {
+                        statementStr = "SELECT variable FROM phantombot_" + fName + " ORDER BY CAST(variable as INTEGER) COLLATE NOCASE " + order + " LIMIT " + limit + " OFFSET " + offset + ";";
+                    } else {
+                        statementStr = "SELECT variable FROM phantombot_" + fName + " ORDER BY variable COLLATE NOCASE " + order + " LIMIT " + limit + " OFFSET " + offset + ";";
                     }
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                } finally {
-                    try {
-                        connection.close();
-                    } catch (SQLException ex) {
-                        com.gmt2001.Console.err.printStackTrace(ex);
+                    try (PreparedStatement statement = connection.prepareStatement(statementStr)) {
+                        try (ResultSet rs = statement.executeQuery()) {
+
+                            ArrayList<String> s = new ArrayList<>();
+
+                            while (rs.next()) {
+                                s.add(rs.getString("variable"));
+                            }
+
+                            out = s.toArray(new String[s.size()]);
+                        }
                     }
                 }
             }
+        } catch (SQLException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
         }
 
         return out;
@@ -596,73 +501,59 @@ public class SqliteStore extends DataStore {
     }
 
     private String[] GetKeysByOrderValueInternal(String fName, String section, String order, String limit, String offset, boolean isNumber) {
-        Connection connection = GetConnection();
-        String statementStr;
-        fName = validateFname(fName);
-        order = sanitizeOrder(order);
-        limit = sanitizeLimit(limit);
-        offset = sanitizeOffset(offset);
-        
-        String[] out = new String[] {
-               };
+        String[] out = new String[]{};
 
-        if (FileExists(fName)) {
-            if (section != null) {
-                if (isNumber) {
-                    statementStr = "SELECT variable FROM phantombot_" + fName + " WHERE section=? ORDER BY CAST(value as INTEGER) COLLATE NOCASE " + order + " LIMIT " + limit + " OFFSET " + offset + ";";
-                } else {
-                    statementStr = "SELECT variable FROM phantombot_" + fName + " WHERE section=? ORDER BY value COLLATE NOCASE " + order + " LIMIT " + limit + " OFFSET " + offset + ";";
-                }
+        try (Connection connection = GetConnection()) {
+            String statementStr;
+            fName = validateFname(fName);
+            order = sanitizeOrder(order);
+            limit = sanitizeLimit(limit);
+            offset = sanitizeOffset(offset);
 
-                try (PreparedStatement statement = connection.prepareStatement(statementStr)) {
-                    statement.setString(1, section);
+            if (FileExists(connection, fName)) {
+                if (section != null) {
+                    if (isNumber) {
+                        statementStr = "SELECT variable FROM phantombot_" + fName + " WHERE section=? ORDER BY CAST(value as INTEGER) COLLATE NOCASE " + order + " LIMIT " + limit + " OFFSET " + offset + ";";
+                    } else {
+                        statementStr = "SELECT variable FROM phantombot_" + fName + " WHERE section=? ORDER BY value COLLATE NOCASE " + order + " LIMIT " + limit + " OFFSET " + offset + ";";
+                    }
 
-                    try (ResultSet rs = statement.executeQuery()) {
+                    try (PreparedStatement statement = connection.prepareStatement(statementStr)) {
+                        statement.setString(1, section);
 
-                        ArrayList<String> s = new ArrayList<String>();
+                        try (ResultSet rs = statement.executeQuery()) {
 
-                        while (rs.next()) {
-                            s.add(rs.getString("variable"));
+                            ArrayList<String> s = new ArrayList<>();
+
+                            while (rs.next()) {
+                                s.add(rs.getString("variable"));
+                            }
+
+                            out = s.toArray(new String[s.size()]);
                         }
-
-                        out = s.toArray(new String[s.size()]);
                     }
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                } finally {
-                    try {
-                        connection.close();
-                    } catch (SQLException ex) {
-                        com.gmt2001.Console.err.printStackTrace(ex);
-                    }
-                }
-            } else {
-                if (isNumber) {
-                    statementStr = "SELECT variable FROM phantombot_" + fName + " ORDER BY CAST(value as INTEGER) COLLATE NOCASE " + order + " LIMIT " + limit + " OFFSET " + offset + ";";
                 } else {
-                    statementStr = "SELECT variable FROM phantombot_" + fName + " ORDER BY value COLLATE NOCASE " + order + " LIMIT " + limit + " OFFSET " + offset + ";";
-                }
-                try (PreparedStatement statement = connection.prepareStatement(statementStr)) {
-                    try (ResultSet rs = statement.executeQuery()) {
-
-                        ArrayList<String> s = new ArrayList<String>();
-
-                        while (rs.next()) {
-                            s.add(rs.getString("variable"));
-                        }
-
-                        out = s.toArray(new String[s.size()]);
+                    if (isNumber) {
+                        statementStr = "SELECT variable FROM phantombot_" + fName + " ORDER BY CAST(value as INTEGER) COLLATE NOCASE " + order + " LIMIT " + limit + " OFFSET " + offset + ";";
+                    } else {
+                        statementStr = "SELECT variable FROM phantombot_" + fName + " ORDER BY value COLLATE NOCASE " + order + " LIMIT " + limit + " OFFSET " + offset + ";";
                     }
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                } finally {
-                    try {
-                        connection.close();
-                    } catch (SQLException ex) {
-                        com.gmt2001.Console.err.printStackTrace(ex);
+                    try (PreparedStatement statement = connection.prepareStatement(statementStr)) {
+                        try (ResultSet rs = statement.executeQuery()) {
+
+                            ArrayList<String> s = new ArrayList<>();
+
+                            while (rs.next()) {
+                                s.add(rs.getString("variable"));
+                            }
+
+                            out = s.toArray(new String[s.size()]);
+                        }
                     }
                 }
             }
+        } catch (SQLException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
         }
 
         return out;
@@ -670,60 +561,43 @@ public class SqliteStore extends DataStore {
 
     @Override
     public String[] GetKeysByLikeValues(String fName, String section, String search) {
-        Connection connection = GetConnection();
+        String[] out = new String[]{};
 
-        fName = validateFname(fName);
+        try (Connection connection = GetConnection()) {
+            fName = validateFname(fName);
 
-        String[] out = new String[] {
-               };
-        
-        if (FileExists(fName)) {
-            if (section != null) {
-                try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE section=? AND value LIKE ?;")) {
-                    statement.setString(1, section);
-                    statement.setString(2, "%" + search + "%");
+            if (FileExists(connection, fName)) {
+                if (section != null) {
+                    try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE section=? AND value LIKE ?;")) {
+                        statement.setString(1, section);
+                        statement.setString(2, "%" + search + "%");
 
-                    try (ResultSet rs = statement.executeQuery()) {
-                        ArrayList<String> s = new ArrayList<String>();
+                        try (ResultSet rs = statement.executeQuery()) {
+                            ArrayList<String> s = new ArrayList<>();
 
-                        while(rs.next()) {
-                            s.add(rs.getString("variable"));
+                            while (rs.next()) {
+                                s.add(rs.getString("variable"));
+                            }
+                            out = s.toArray(new String[s.size()]);
                         }
-                        out = s.toArray(new String[s.size()]);
                     }
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                } finally {
-                    try {
-                        connection.close();
-                    } catch (SQLException ex) {
-                        com.gmt2001.Console.err.printStackTrace(ex);
-                    }
-                }
-            } else {
-                try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE value LIKE ?;")) {
-                    statement.setString(1, "%" + search + "%");
+                } else {
+                    try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE value LIKE ?;")) {
+                        statement.setString(1, "%" + search + "%");
 
-                    try (ResultSet rs = statement.executeQuery()) {
-                        ArrayList<String> s = new ArrayList<String>();
+                        try (ResultSet rs = statement.executeQuery()) {
+                            ArrayList<String> s = new ArrayList<>();
 
-                        while(rs.next()) {
-                            s.add(rs.getString("variable"));
+                            while (rs.next()) {
+                                s.add(rs.getString("variable"));
+                            }
+                            out = s.toArray(new String[s.size()]);
                         }
-                        out = s.toArray(new String[s.size()]);
-                    }
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                } catch (Exception ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                } finally {
-                    try {
-                        connection.close();
-                    } catch (SQLException ex) {
-                        com.gmt2001.Console.err.printStackTrace(ex);
                     }
                 }
             }
+        } catch (SQLException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
         }
 
         return out;
@@ -731,60 +605,43 @@ public class SqliteStore extends DataStore {
 
     @Override
     public String[] GetKeysByLikeKeys(String fName, String section, String search) {
-        Connection connection = GetConnection();
+        String[] out = new String[]{};
 
-        fName = validateFname(fName);
+        try (Connection connection = GetConnection()) {
+            fName = validateFname(fName);
 
-        String[] out = new String[] {
-               };
-        
-        if (FileExists(fName)) {
-            if (section != null) {
-                try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE section=? AND variable LIKE ?;")) {
-                    statement.setString(1, section);
-                    statement.setString(2, "%" + search + "%");
+            if (FileExists(connection, fName)) {
+                if (section != null) {
+                    try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE section=? AND variable LIKE ?;")) {
+                        statement.setString(1, section);
+                        statement.setString(2, "%" + search + "%");
 
-                    try (ResultSet rs = statement.executeQuery()) {
-                        ArrayList<String> s = new ArrayList<String>();
+                        try (ResultSet rs = statement.executeQuery()) {
+                            ArrayList<String> s = new ArrayList<>();
 
-                        while(rs.next()) {
-                            s.add(rs.getString("variable"));
+                            while (rs.next()) {
+                                s.add(rs.getString("variable"));
+                            }
+                            out = s.toArray(new String[s.size()]);
                         }
-                        out = s.toArray(new String[s.size()]);
                     }
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                } finally {
-                    try {
-                        connection.close();
-                    } catch (SQLException ex) {
-                        com.gmt2001.Console.err.printStackTrace(ex);
-                    }
-                }
-            } else {
-                try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE variable LIKE ?;")) {
-                    statement.setString(1, "%" + search + "%");
+                } else {
+                    try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE variable LIKE ?;")) {
+                        statement.setString(1, "%" + search + "%");
 
-                    try (ResultSet rs = statement.executeQuery()) {
-                        ArrayList<String> s = new ArrayList<String>();
+                        try (ResultSet rs = statement.executeQuery()) {
+                            ArrayList<String> s = new ArrayList<>();
 
-                        while(rs.next()) {
-                            s.add(rs.getString("variable"));
+                            while (rs.next()) {
+                                s.add(rs.getString("variable"));
+                            }
+                            out = s.toArray(new String[s.size()]);
                         }
-                        out = s.toArray(new String[s.size()]);
-                    }
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                } catch (Exception ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                } finally {
-                    try {
-                        connection.close();
-                    } catch (SQLException ex) {
-                        com.gmt2001.Console.err.printStackTrace(ex);
                     }
                 }
             }
+        } catch (SQLException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
         }
 
         return out;
@@ -792,63 +649,48 @@ public class SqliteStore extends DataStore {
 
     @Override
     public String[] GetKeysByLikeKeysOrder(String fName, String section, String search, String order, String limit, String offset) {
-        Connection connection = GetConnection();
+        String[] out = new String[]{};
 
-        fName = validateFname(fName);
-        order = sanitizeOrder(order);
-        limit = sanitizeLimit(limit);
-        offset = sanitizeOffset(offset);
+        try (Connection connection = GetConnection()) {
+            fName = validateFname(fName);
+            order = sanitizeOrder(order);
+            limit = sanitizeLimit(limit);
+            offset = sanitizeOffset(offset);
 
-        String[] out = new String[] {
-               };
-        
-        if (FileExists(fName)) {
-            if (section != null) {
-                try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE section=? AND variable LIKE ? ORDER BY variable " + order + " LIMIT " + limit + " OFFSET " + offset + ";")) {
-                    statement.setString(1, section);
-                    statement.setString(2, "%" + search + "%");
+            if (FileExists(connection, fName)) {
+                if (section != null) {
+                    try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE section=? AND variable LIKE ? ORDER BY variable " + order + " LIMIT " + limit + " OFFSET " + offset + ";")) {
+                        statement.setString(1, section);
+                        statement.setString(2, "%" + search + "%");
 
-                    try (ResultSet rs = statement.executeQuery()) {
-                        ArrayList<String> s = new ArrayList<String>();
+                        try (ResultSet rs = statement.executeQuery()) {
+                            ArrayList<String> s = new ArrayList<>();
 
-                        while(rs.next()) {
-                            s.add(rs.getString("variable"));
+                            while (rs.next()) {
+                                s.add(rs.getString("variable"));
+                            }
+
+                            out = s.toArray(new String[s.size()]);
                         }
-                        out = s.toArray(new String[s.size()]);
                     }
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                } finally {
-                    try {
-                        connection.close();
-                    } catch (SQLException ex) {
-                        com.gmt2001.Console.err.printStackTrace(ex);
-                    }
-                }
-            } else {
-                try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE variable LIKE ? ORDER BY variable " + order + " LIMIT " + limit + " OFFSET " + offset + ";")) {
-                    statement.setString(1, "%" + search + "%");
+                } else {
+                    try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE variable LIKE ? ORDER BY variable " + order + " LIMIT " + limit + " OFFSET " + offset + ";")) {
+                        statement.setString(1, "%" + search + "%");
 
-                    try (ResultSet rs = statement.executeQuery()) {
-                        ArrayList<String> s = new ArrayList<String>();
+                        try (ResultSet rs = statement.executeQuery()) {
+                            ArrayList<String> s = new ArrayList<>();
 
-                        while(rs.next()) {
-                            s.add(rs.getString("variable"));
+                            while (rs.next()) {
+                                s.add(rs.getString("variable"));
+                            }
+
+                            out = s.toArray(new String[s.size()]);
                         }
-                        out = s.toArray(new String[s.size()]);
-                    }
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                } catch (Exception ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                } finally {
-                    try {
-                        connection.close();
-                    } catch (SQLException ex) {
-                        com.gmt2001.Console.err.printStackTrace(ex);
                     }
                 }
             }
+        } catch (SQLException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
         }
 
         return out;
@@ -856,55 +698,41 @@ public class SqliteStore extends DataStore {
 
     @Override
     public boolean HasKey(String fName, String section, String key) {
-        Connection connection = GetConnection();
-
-        fName = validateFname(fName);
-
-        if (!FileExists(fName)) {
-            return false;
-        }
-
         boolean out = false;
-        
-        if (section != null) {
-            try (PreparedStatement statement = connection.prepareStatement("SELECT value FROM phantombot_" + fName + " WHERE section=? AND variable=?;")) {
-                statement.setString(1, section);
-                statement.setString(2, key);
 
-                try (ResultSet rs = statement.executeQuery()) {
+        try (Connection connection = GetConnection()) {
+            fName = validateFname(fName);
 
-                    if (rs.next()) {
-                        out = true;
+            if (!FileExists(connection, fName)) {
+                return false;
+            }
+
+            if (section != null) {
+                try (PreparedStatement statement = connection.prepareStatement("SELECT value FROM phantombot_" + fName + " WHERE section=? AND variable=?;")) {
+                    statement.setString(1, section);
+                    statement.setString(2, key);
+
+                    try (ResultSet rs = statement.executeQuery()) {
+
+                        if (rs.next()) {
+                            out = true;
+                        }
                     }
                 }
-            } catch (SQLException ex) {
-                com.gmt2001.Console.err.printStackTrace(ex);
-            } finally {
-                try {
-                    connection.close();
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                }
-            }
-        } else {
-            try (PreparedStatement statement = connection.prepareStatement("SELECT value FROM phantombot_" + fName + " WHERE variable=?;")) {
-                statement.setString(1, key);
+            } else {
+                try (PreparedStatement statement = connection.prepareStatement("SELECT value FROM phantombot_" + fName + " WHERE variable=?;")) {
+                    statement.setString(1, key);
 
-                try (ResultSet rs = statement.executeQuery()) {
+                    try (ResultSet rs = statement.executeQuery()) {
 
-                    if (rs.next()) {
-                        out = true;
+                        if (rs.next()) {
+                            out = true;
+                        }
                     }
                 }
-            } catch (SQLException ex) {
-                com.gmt2001.Console.err.printStackTrace(ex);
-            } finally {
-                try {
-                    connection.close();
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                }
             }
+        } catch (SQLException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
         }
 
         return out;
@@ -912,55 +740,41 @@ public class SqliteStore extends DataStore {
 
     @Override
     public String GetKeyByValue(String fName, String section, String value) {
-        Connection connection = GetConnection();
-
         String result = null;
 
-        fName = validateFname(fName);
+        try (Connection connection = GetConnection()) {
+            fName = validateFname(fName);
 
-        if (!FileExists(fName)) {
-            return result;
-        }
+            if (!FileExists(connection, fName)) {
+                return result;
+            }
 
-        if (section != null) {
-            try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE section=? AND value=?;")) {
-                statement.setString(1, section);
-                statement.setString(2, value);
+            if (section != null) {
+                try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE section=? AND value=?;")) {
+                    statement.setString(1, section);
+                    statement.setString(2, value);
 
-                try (ResultSet rs = statement.executeQuery()) {
+                    try (ResultSet rs = statement.executeQuery()) {
 
-                    if (rs.next()) {
-                        result = rs.getString("variable");
+                        if (rs.next()) {
+                            result = rs.getString("variable");
+                        }
                     }
                 }
-            } catch (SQLException ex) {
-                com.gmt2001.Console.err.printStackTrace(ex);
-            } finally {
-                try {
-                    connection.close();
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                }
-            }
-        } else {
-            try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE value=?;")) {
-                statement.setString(1, value);
+            } else {
+                try (PreparedStatement statement = connection.prepareStatement("SELECT variable FROM phantombot_" + fName + " WHERE value=?;")) {
+                    statement.setString(1, value);
 
-                try (ResultSet rs = statement.executeQuery()) {
+                    try (ResultSet rs = statement.executeQuery()) {
 
-                    if (rs.next()) {
-                        result = rs.getString("variable");
+                        if (rs.next()) {
+                            result = rs.getString("variable");
+                        }
                     }
                 }
-            } catch (SQLException ex) {
-                com.gmt2001.Console.err.printStackTrace(ex);
-            } finally {
-                try {
-                    connection.close();
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                }
             }
+        } catch (SQLException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
         }
 
         return result;
@@ -969,55 +783,41 @@ public class SqliteStore extends DataStore {
 
     @Override
     public String GetString(String fName, String section, String key) {
-        Connection connection = GetConnection();
-
         String result = null;
 
-        fName = validateFname(fName);
+        try (Connection connection = GetConnection()) {
+            fName = validateFname(fName);
 
-        if (!FileExists(fName)) {
-            return result;
-        }
+            if (!FileExists(connection, fName)) {
+                return result;
+            }
 
-        if (section != null) {
-            try (PreparedStatement statement = connection.prepareStatement("SELECT value FROM phantombot_" + fName + " WHERE section=? AND variable=?;")) {
-                statement.setString(1, section);
-                statement.setString(2, key);
+            if (section != null) {
+                try (PreparedStatement statement = connection.prepareStatement("SELECT value FROM phantombot_" + fName + " WHERE section=? AND variable=?;")) {
+                    statement.setString(1, section);
+                    statement.setString(2, key);
 
-                try (ResultSet rs = statement.executeQuery()) {
+                    try (ResultSet rs = statement.executeQuery()) {
 
-                    if (rs.next()) {
-                        result = rs.getString("value");
+                        if (rs.next()) {
+                            result = rs.getString("value");
+                        }
                     }
                 }
-            } catch (SQLException ex) {
-                com.gmt2001.Console.err.printStackTrace(ex);
-            } finally {
-                try {
-                    connection.close();
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                }
-            }
-        } else {
-            try (PreparedStatement statement = connection.prepareStatement("SELECT value FROM phantombot_" + fName + " WHERE variable=?;")) {
-                statement.setString(1, key);
+            } else {
+                try (PreparedStatement statement = connection.prepareStatement("SELECT value FROM phantombot_" + fName + " WHERE variable=?;")) {
+                    statement.setString(1, key);
 
-                try (ResultSet rs = statement.executeQuery()) {
+                    try (ResultSet rs = statement.executeQuery()) {
 
-                    if (rs.next()) {
-                        result = rs.getString("value");
+                        if (rs.next()) {
+                            result = rs.getString("value");
+                        }
                     }
                 }
-            } catch (SQLException ex) {
-                com.gmt2001.Console.err.printStackTrace(ex);
-            } finally {
-                try {
-                    connection.close();
-                } catch (SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                }
             }
+        } catch (SQLException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
         }
 
         return result;
@@ -1025,78 +825,82 @@ public class SqliteStore extends DataStore {
 
     @Override
     public void SetBatchString(String fName, String section, String[] keys, String[] values) {
-        Connection connection = GetConnection();
+        try (Connection connection = GetConnection()) {
 
-        fName = validateFname(fName);
-        AddFile(fName);
+            fName = validateFname(fName);
+            AddFile(connection, fName);
 
-        /* Walk the list of keys to figure out which ones can pass INSERT and which ones need UPDATE */
-        Map<String, String> insertMap = new HashMap<String, String>();
-        Map<String, String> updateMap = new HashMap<String, String>();
+            /* Walk the list of keys to figure out which ones can pass INSERT and which ones need UPDATE */
+            Map<String, String> insertMap = new HashMap<>();
+            Map<String, String> updateMap = new HashMap<>();
 
-        for (int idx = 0; idx < keys.length; idx++) {
-            if (HasKey(fName, section, keys[idx])) {
-                updateMap.put(keys[idx], values[idx]);
-            } else {
-                insertMap.put(keys[idx], values[idx]);
+            for (int idx = 0; idx < keys.length; idx++) {
+                if (HasKey(fName, section, keys[idx])) {
+                    updateMap.put(keys[idx], values[idx]);
+                } else {
+                    insertMap.put(keys[idx], values[idx]);
+                }
             }
-        }
 
-        try {
+            connection.setAutoCommit(false);
+
             if (insertMap.size() > 0) {
-                PreparedStatement statement = connection.prepareStatement("INSERT INTO phantombot_" + fName + " (value, section, variable) values(?, ?, ?);");
-                for (String key : insertMap.keySet()) {
-                    statement.setString(1, insertMap.get(key));
-                    statement.setString(2, section);
-                    statement.setString(3, key);
-                    statement.addBatch();
+                try (PreparedStatement statement = connection.prepareStatement("INSERT INTO phantombot_" + fName + " (value, section, variable) values(?, ?, ?);")) {
+                    for (String key : insertMap.keySet()) {
+                        statement.setString(1, insertMap.get(key));
+                        statement.setString(2, section);
+                        statement.setString(3, key);
+                        statement.addBatch();
+                    }
+
+                    statement.executeBatch();
                 }
-                
-                writequeue.enqueue(statement, connection, true, false, true);
             }
+
             if (updateMap.size() > 0) {
-                PreparedStatement statement = connection.prepareStatement("UPDATE phantombot_" + fName + " SET value=? WHERE section=? and variable=?;");
-                for (String key : updateMap.keySet()) {
-                    statement.setString(1, updateMap.get(key));
-                    statement.setString(2, section);
-                    statement.setString(3, key);
-                    statement.addBatch();
+                try (PreparedStatement statement = connection.prepareStatement("UPDATE phantombot_" + fName + " SET value=? WHERE section=? and variable=?;")) {
+                    for (String key : updateMap.keySet()) {
+                        statement.setString(1, updateMap.get(key));
+                        statement.setString(2, section);
+                        statement.setString(3, key);
+                        statement.addBatch();
+                    }
+
+                    statement.executeBatch();
                 }
-                
-                writequeue.enqueue(statement, connection, true, false, true);
             }
+
+            connection.commit();
+            connection.setAutoCommit(true);
         } catch (SQLException ex) {
-            com.gmt2001.Console.err.println(ex);
             com.gmt2001.Console.err.printStackTrace(ex);
         }
-
-        setAutoCommit(true);
     }
 
     @Override
     public void SetString(String fName, String section, String key, String value) {
-        Connection connection = GetConnection();
+        try (Connection connection = GetConnection()) {
 
-        fName = validateFname(fName);
+            fName = validateFname(fName);
 
-        AddFile(fName);
+            AddFile(connection, fName);
 
-        try {
             if (HasKey(fName, section, key)) {
-                PreparedStatement statement = connection.prepareStatement("UPDATE phantombot_" + fName + " SET value=? WHERE section=? AND variable=?;");
-                statement.setString(1, value);
-                statement.setString(2, section);
-                statement.setString(3, key);
-                statement.addBatch();
-                writequeue.enqueue(statement, connection);
+                try (PreparedStatement statement = connection.prepareStatement("UPDATE phantombot_" + fName + " SET value=? WHERE section=? AND variable=?;")) {
+                    statement.setString(1, value);
+                    statement.setString(2, section);
+                    statement.setString(3, key);
+                    statement.execute();
+                }
             } else {
-                PreparedStatement statement = connection.prepareStatement("INSERT INTO phantombot_" + fName + " values(?, ?, ?);");
-                statement.setString(1, section);
-                statement.setString(2, key);
-                statement.setString(3, value);
-                statement.addBatch();
-                writequeue.enqueue(statement, connection);
+                try (PreparedStatement statement = connection.prepareStatement("INSERT INTO phantombot_" + fName + " values(?, ?, ?);")) {
+                    statement.setString(1, section);
+                    statement.setString(2, key);
+                    statement.setString(3, value);
+                    statement.execute();
+                }
             }
+
         } catch (SQLException ex) {
             com.gmt2001.Console.err.printStackTrace(ex);
         }
@@ -1104,43 +908,46 @@ public class SqliteStore extends DataStore {
 
     @Override
     public void IncreaseBatchString(String fName, String section, String[] keys, String value) {
-        Connection connection = GetConnection();
-        fName = validateFname(fName);
+        try (Connection connection = GetConnection()) {
+            fName = validateFname(fName);
 
-        AddFile(fName);
+            AddFile(connection, fName);
 
-        try {
-            PreparedStatement statement = connection.prepareStatement("UPDATE phantombot_" + fName + " SET value = CAST(value AS INTEGER) + " + value + " WHERE section = '" + section + "' AND variable IN ('" + String.join("', '", keys) + "');");
-            statement.addBatch();
-            writequeue.enqueue(statement, connection, false);
+            connection.setAutoCommit(false);
 
-            StringBuilder sb = new StringBuilder(69 + fName.length() + (keys.length * (keys[0].length() + 17 + section.length() + value.length())));
-            
-            sb.append("INSERT OR IGNORE INTO phantombot_");
-            sb.append(fName);
-            sb.append(" (section, variable, value) VALUES ");
+            try (Statement statement = connection.createStatement()) {
+                statement.addBatch("UPDATE phantombot_" + fName + " SET value = CAST(value AS INTEGER) + " + value + " WHERE section = '" + section + "' AND variable IN ('" + String.join("', '", keys) + "');");
 
-            boolean first = true;
-            for (String k : keys) {
-                if (!first) {
-                    sb.append(",");
+                StringBuilder sb = new StringBuilder(69 + fName.length() + (keys.length * (keys[0].length() + 17 + section.length() + value.length())));
+
+                sb.append("INSERT OR IGNORE INTO phantombot_");
+                sb.append(fName);
+                sb.append(" (section, variable, value) VALUES ");
+
+                boolean first = true;
+                for (String k : keys) {
+                    if (!first) {
+                        sb.append(",");
+                    }
+
+                    first = false;
+                    sb.append("('");
+                    sb.append(section);
+                    sb.append("', '");
+                    sb.append(k);
+                    sb.append("', ");
+                    sb.append(value);
+                    sb.append(")");
                 }
 
-                first = false;
-                sb.append("('");
-                sb.append(section);
-                sb.append("', '");
-                sb.append(k);
-                sb.append("', ");
-                sb.append(value);
-                sb.append(")");
-            }
-            
-            sb.append(";");
+                sb.append(";");
 
-            statement = connection.prepareStatement(sb.toString());
-            statement.addBatch();
-            writequeue.enqueue(statement, connection, true);
+                statement.addBatch(sb.toString());
+                statement.executeBatch();
+            }
+
+            connection.commit();
+            connection.setAutoCommit(true);
         } catch (SQLException ex) {
             com.gmt2001.Console.err.printStackTrace(ex);
         }
@@ -1148,19 +955,18 @@ public class SqliteStore extends DataStore {
 
     @Override
     public void InsertString(String fName, String section, String key, String value) {
-        Connection connection = GetConnection();
+        try (Connection connection = GetConnection()) {
 
-        fName = validateFname(fName);
+            fName = validateFname(fName);
 
-        AddFile(fName);
+            AddFile(connection, fName);
 
-        try {
-            PreparedStatement statement = connection.prepareStatement("INSERT INTO phantombot_" + fName + " values(?, ?, ?);");
-            statement.setString(1, section);
-            statement.setString(2, key);
-            statement.setString(3, value);
-            statement.addBatch();
-            writequeue.enqueue(statement, connection);
+            try (PreparedStatement statement = connection.prepareStatement("INSERT INTO phantombot_" + fName + " values(?, ?, ?);")) {
+                statement.setString(1, section);
+                statement.setString(2, key);
+                statement.setString(3, value);
+                statement.execute();
+            }
         } catch (SQLException ex) {
             com.gmt2001.Console.err.printStackTrace(ex);
         }
@@ -1168,249 +974,63 @@ public class SqliteStore extends DataStore {
 
     @Override
     public void CreateIndexes() {
-        Connection connection = GetConnection();
-        String[] tableNames = GetFileList();
-        for (String tableName : tableNames) {
-            tableName = validateFname(tableName);
-            try {
-                PreparedStatement statement = connection.prepareStatement("CREATE UNIQUE INDEX IF NOT EXISTS " + tableName + "_idx on phantombot_" + tableName + " (section, variable);");
-                statement.addBatch();
-                writequeue.enqueue(statement, connection, false);
-            } catch (SQLException ex) {
-                com.gmt2001.Console.err.printStackTrace(ex);
-            }
-        }
-        
-        writequeue.enqueue(null, connection, true);
-    }
-
-    @Override
-    public void DropIndexes() {
-        Connection connection = GetConnection();
-        String[] tableNames = GetFileList();
-        for (String tableName : tableNames) {
-            tableName = validateFname(tableName);
-            try {
-                PreparedStatement statement = connection.prepareStatement("DROP INDEX IF EXISTS " + tableName + "_idx");
-                statement.addBatch();
-                writequeue.enqueue(statement, connection, false);
-            } catch (SQLException ex) {
-                com.gmt2001.Console.err.printStackTrace(ex);
-            }
-        }
-        
-        writequeue.enqueue(null, connection, true);
-    }
-
-    @Override
-    public void backupSQLite3(String filename) {
-        Connection connection = GetConnection();
-
-        if (!new File ("./dbbackup").exists()) new File ("./dbbackup").mkdirs();
-
-        try {
+        try (Connection connection = GetConnection()) {
+            String[] tableNames = GetFileList();
             try (Statement statement = connection.createStatement()) {
-                statement.execute("backup to ./dbbackup/" + filename);
-                com.gmt2001.Console.debug.println("Backed up SQLite3 DB to ./dbbackup/" + filename);
+                for (String tableName : tableNames) {
+                    tableName = validateFname(tableName);
+                    statement.execute("CREATE UNIQUE INDEX IF NOT EXISTS " + tableName + "_idx on phantombot_" + tableName + " (section, variable);");
+                }
             }
-            connection.close();
         } catch (SQLException ex) {
             com.gmt2001.Console.err.printStackTrace(ex);
         }
     }
-    
-    private static class WQStatement {
-        public int id;
-        public Statement statement;
-        public Connection connection = null;
-        public boolean isBatch = false;
-        public boolean autoCommit = true;
-        public boolean blocking = false;
-        public boolean shouldClose = true;
-        
-        public WQStatement(int id, Statement statement, Connection connection) {
-            this.id = id;
-            this.statement = statement;
-            this.connection = connection;
-        }
-        
-        public WQStatement(int id, Statement statement, Connection connection, boolean isBatch, boolean autoCommit) {
-            this.id = id;
-            this.statement = statement;
-            this.connection = connection;
-            this.isBatch = isBatch;
-            this.autoCommit = autoCommit;
-        }
-        
-        public WQStatement(int id, Statement statement, Connection connection, boolean isBatch, boolean autoCommit, boolean blocking, boolean shouldClose) {
-            this.id = id;
-            this.statement = statement;
-            this.connection = connection;
-            this.isBatch = isBatch;
-            this.autoCommit = autoCommit;
-            this.blocking = blocking;
-            this.shouldClose = shouldClose;
+
+    @Override
+    public void DropIndexes() {
+        try (Connection connection = GetConnection()) {
+            String[] tableNames = GetFileList();
+            try (Statement statement = connection.createStatement()) {
+                for (String tableName : tableNames) {
+                    tableName = validateFname(tableName);
+                    statement.execute("DROP INDEX IF EXISTS " + tableName + "_idx");
+                }
+            }
+        } catch (SQLException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
         }
     }
-    
-    private static class WriteQueue implements Runnable {
-        private final BlockingDeque<WQStatement> queue = new LinkedBlockingDeque<>();
-        private final BlockingDeque<WQStatement> completed = new LinkedBlockingDeque<>();
-        private final Thread thread;
-        public boolean isRunning = false;
-        private boolean isKilled = false;
-        private int nextID = 0;
 
-        /**
-         * Class constructor.
-         *
-         * @param {String} channelName
-         */
-        public WriteQueue() {
-            // Set the default thread uncaught exception handler.
-            Thread.setDefaultUncaughtExceptionHandler(com.gmt2001.UncaughtExceptionHandler.instance());
+    @Override
+    public boolean canBackup() {
+        return true;
+    }
 
-            // Start a new thread for our final queue.
-            this.thread = new Thread(this, "com.gmt2001.datastore.SqliteStore.WriteQueue::run");
-            this.thread.setUncaughtExceptionHandler(com.gmt2001.UncaughtExceptionHandler.instance());
-            this.thread.setPriority(Thread.NORM_PRIORITY);
-        }
-
-        /**
-         * Method that starts this queue.
-         *
-         * @param {TwitchSession} session
-         */
-        public void start() {
-            // Start the write thread.
-            this.isRunning = true;
-            this.thread.start();
-        }
-        
-        /**
-         * Method that adds a statement to the end of the queue.
-         *
-         * @param {PreparedStatement} statement
-         */
-        public void enqueue(Statement statement, Connection connection) {
-            enqueue(statement, connection, false, true, true);
-        }
-        
-        /**
-         * Method that adds a statement to the end of the queue.
-         *
-         * @param {PreparedStatement} statement
-         */
-        public void enqueue(Statement statement, Connection connection, boolean shouldClose) {
-            enqueue(statement, connection, false, true, shouldClose);
-        }
-
-        /**
-         * Method that adds a statement to the end of the queue.
-         *
-         * @param {PreparedStatement} statement
-         * @param {boolean} isBatch
-         * @param {boolean} autoCommit
-         */
-        public void enqueue(Statement statement, Connection connection, boolean isBatch, boolean autoCommit, boolean close) {
-            queue.add(new WQStatement(nextID++, statement, connection, isBatch, autoCommit, false, close));
-            
-            if (nextID >= Integer.MAX_VALUE - 5) {
-                nextID = 0;
+    @Override
+    public void backupDB(String filename) {
+        try (Connection connection = GetConnection()) {
+            if (!new File("./dbbackup").exists()) {
+                new File("./dbbackup").mkdirs();
             }
-        }
-        
-        public void block(Statement statement, Connection connection) {
-            block(statement, connection, false, true, true);
-        }
-        
-        @SuppressWarnings("SleepWhileInLoop")
-        public void block(Statement statement, Connection connection, boolean isBatch, boolean autoCommit, boolean close) {
-            queue.add(new WQStatement(nextID++, statement, connection, isBatch, autoCommit, true, close));
-            
-            int id = nextID - 1;
-            
-            if (nextID >= Integer.MAX_VALUE - 5) {
-                nextID = 0;
-            }
-            
-            boolean found = false;
-            
-            while (!found) {
-                try {
-                    WQStatement cstatement = completed.peek();
-                    
-                    if (cstatement != null && cstatement.id == id) {
-                        found = true;
-                    } else {
-                        Thread.sleep(100);
-                    }
-                } catch (InterruptedException ex) {
-                    com.gmt2001.Console.err.logStackTrace(ex);
-                }
-            }
-            
-            try {
-                completed.take();
-            } catch (InterruptedException ex) {
-                com.gmt2001.Console.err.logStackTrace(ex);
-            }
-        }
 
-        /**
-         * Method that handles sending messages to Twitch from our queue.
-         */
-        @Override
-        public void run() {
-            while (!isKilled) {
-                int id = 0;
-                boolean blocking = false;
-                
-                try {
-                    // Get the next message in the queue.
-                    WQStatement statement = queue.take();
-                    
-                    id = statement.id;
-                    blocking = statement.blocking;
-                    
-                    if (!statement.autoCommit) {
-                        statement.connection.setAutoCommit(false);
-                    }
-                    
-                    if (statement.statement != null) {
-                        statement.statement.executeBatch();
-                        statement.statement.clearBatch();
-
-                        statement.statement.close();
-                    }
-                    
-                    if (!statement.autoCommit) {
-                        statement.connection.commit();
-                        statement.connection.setAutoCommit(true);
-                    }
-                    
-                    if (statement.shouldClose) {
-                        statement.connection.close();
-                    }
-                    
-                    if (blocking) {
-                        completed.add(statement);
-                    }
-                } catch (InterruptedException | SQLException ex) {
-                    com.gmt2001.Console.err.printStackTrace(ex);
-                    
-                    if (blocking) {
-                        completed.add(new WQStatement(id, null, null));
-                    }
-                }
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("backup to ./dbbackup/" + filename);
+                com.gmt2001.Console.debug.println("Backed up SQLite3 DB to ./dbbackup/" + filename);
             }
+        } catch (SQLException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
         }
+    }
 
-        /**
-         * Method that kills this instance.
-         */
-        public void kill() {
-            this.isKilled = true;
+    @Override
+    public void dispose() {
+        super.dispose();
+
+        try {
+            poolMgr.dispose();
+        } catch (SQLException ex) {
+            com.gmt2001.Console.err.printStackTrace(ex);
         }
     }
 }

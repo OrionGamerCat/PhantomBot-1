@@ -16,17 +16,19 @@
  */
 package com.gmt2001.datastore;
 
-import java.sql.Connection;
-
 /**
  *
  * @author gmt2001
  */
 public class DataStore {
 
-    private static final DataStore instance = new DataStore();
+    private static DataStore instance;
 
     public static DataStore instance() {
+        if (instance == null) {
+            instance = new DataStore();
+        }
+
         return instance;
     }
 
@@ -42,23 +44,20 @@ public class DataStore {
     public void ReloadFile(String fName) {
     }
 
-    public void LoadConfig(String configStr) {
-    }
-
     public String[] GetFileList() {
-        return new String[] { };
+        return new String[]{};
     }
 
     public String[] GetCategoryList(String fName) {
-        return new String[] { };
+        return new String[]{};
     }
 
     public String[] GetKeyList(String fName, String section) {
-        return new String[] { };
+        return new String[]{};
     }
 
     public KeyValue[] GetKeyValueList(String fName, String section) {
-        return new KeyValue[] { };
+        return new KeyValue[]{};
     }
 
     public String[] GetKeysByOrder(String fName) {
@@ -74,7 +73,7 @@ public class DataStore {
     }
 
     public String[] GetKeysByOrder(String fName, String section, String order, String limit, String offset) {
-        return new String[] { };
+        return new String[]{};
     }
 
     public String[] GetKeysByNumberOrder(String fName) {
@@ -90,7 +89,7 @@ public class DataStore {
     }
 
     public String[] GetKeysByNumberOrder(String fName, String section, String order, String limit, String offset) {
-        return new String[] { };
+        return new String[]{};
     }
 
     public String[] GetKeysByOrderValue(String fName) {
@@ -106,7 +105,7 @@ public class DataStore {
     }
 
     public String[] GetKeysByOrderValue(String fName, String section, String order, String limit, String offset) {
-        return new String[] { };
+        return new String[]{};
     }
 
     public String[] GetKeysByNumberOrderValue(String fName) {
@@ -122,7 +121,7 @@ public class DataStore {
     }
 
     public String[] GetKeysByNumberOrderValue(String fName, String section, String order, String limit, String offset) {
-        return new String[] { };
+        return new String[]{};
     }
 
     public String GetKeyByValue(String fName, String section, String value) {
@@ -130,11 +129,11 @@ public class DataStore {
     }
 
     public String[] GetKeysByLikeValues(String fName, String section, String search) {
-        return new String[] { };
+        return new String[]{};
     }
 
     public String[] GetKeysByLikeKeys(String fName, String section, String search) {
-        return new String[] { };
+        return new String[]{};
     }
 
     public String[] GetKeysByLikeKeysOrder(String fName, String search) {
@@ -150,7 +149,7 @@ public class DataStore {
     }
 
     public String[] GetKeysByLikeKeysOrder(String fName, String section, String search, String order, String limit, String offset) {
-        return new String[] { };
+        return new String[]{};
     }
 
     public String GetString(String fName, String section, String key) {
@@ -186,7 +185,7 @@ public class DataStore {
 
         try {
             return Long.parseLong(sval);
-        } catch (Exception ex) {
+        } catch (NumberFormatException ex) {
             return 0;
         }
     }
@@ -202,7 +201,7 @@ public class DataStore {
 
         try {
             return Integer.parseInt(sval);
-        } catch (Exception ex) {
+        } catch (NumberFormatException ex) {
             return 0;
         }
     }
@@ -218,7 +217,7 @@ public class DataStore {
 
         try {
             return Float.parseFloat(sval);
-        } catch (Exception ex) {
+        } catch (NumberFormatException ex) {
             return 0.0f;
         }
     }
@@ -234,7 +233,7 @@ public class DataStore {
 
         try {
             return Double.parseDouble(sval);
-        } catch (Exception ex) {
+        } catch (NumberFormatException ex) {
             return 0.0;
         }
     }
@@ -358,16 +357,21 @@ public class DataStore {
     public void DropIndexes() {
     }
 
-    public Connection CreateConnection(String db, String user, String pass) {
-        return null;
+    public boolean CanConnect() {
+        return true;
     }
 
-    public void CloseConnection() {
+    public boolean CanConnect(String db, String user, String pass) {
+        return true;
     }
 
-    public void setAutoCommit(boolean mode) {
+    public boolean canBackup() {
+        return false;
     }
 
-    public void backupSQLite3(String filename) {
+    public void backupDB(String filename) {
+    }
+
+    public void dispose() {
     }
 }

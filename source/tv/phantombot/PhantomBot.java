@@ -236,9 +236,9 @@ public final class PhantomBot implements Listener {
     private TwitchPubSub pubSubEdge;
     private Properties pbProperties;
     private Boolean legacyServers = false;
-    private Boolean backupSQLiteAuto = false;
-    private int backupSQLiteHourFrequency = 0;
-    private int backupSQLiteKeepDays = 0;
+    private Boolean backupDBAuto = false;
+    private int backupDBHourFrequency = 0;
+    private int backupDBKeepDays = 0;
 
     // Error codes
     // [...] by convention, a nonzero status code indicates abnormal termination. (see System.exit() JavaDoc)
@@ -514,10 +514,10 @@ public final class PhantomBot implements Listener {
         /* Set the client id for the twitch api to use */
         this.clientId = this.pbProperties.getProperty("clientid", "7wpchwtqz7pvivc3qbdn1kajz42tdmb");
 
-        /* Set any SQLite backup options. */
-        this.backupSQLiteAuto = this.pbProperties.getProperty("backupsqliteauto", "true").equalsIgnoreCase("true");
-        this.backupSQLiteHourFrequency = Integer.parseInt(this.pbProperties.getProperty("backupsqlitehourfrequency", "24"));
-        this.backupSQLiteKeepDays = Integer.parseInt(this.pbProperties.getProperty("backupsqlitekeepdays", "5"));
+        /* Set any DB backup options. */
+        this.backupDBAuto = this.pbProperties.getProperty("backupdbauto", this.pbProperties.getProperty("backupsqliteauto", "true")).equalsIgnoreCase("true");
+        this.backupDBHourFrequency = Integer.parseInt(this.pbProperties.getProperty("backupdbhourfrequency", this.pbProperties.getProperty("backupsqlitehourfrequency", "24")));
+        this.backupDBKeepDays = Integer.parseInt(this.pbProperties.getProperty("backupdbkeepdays", this.pbProperties.getProperty("backupsqlitekeepdays", "5")));
 
         // Set the newSetup flag
         this.newSetup = this.pbProperties.getProperty("newSetup").equals("true");
@@ -527,42 +527,42 @@ public final class PhantomBot implements Listener {
 
         /* Load the datastore */
         if (dataStoreType.equalsIgnoreCase("inistore")) {
-            dataStore = IniStore.instance();
+            dataStore = IniStore.instance(dataStoreConfig);
         } else if (dataStoreType.equalsIgnoreCase("mysqlstore")) {
-            dataStore = MySQLStore.instance();
+            dataStore = MySQLStore.instance(dataStoreConfig);
             if (this.mySqlPort.isEmpty()) {
                 this.mySqlConn = "jdbc:mysql://" + this.mySqlHost + "/" + this.mySqlName + "?useSSL=false";
             } else {
                 this.mySqlConn = "jdbc:mysql://" + this.mySqlHost + ":" + this.mySqlPort + "/" + this.mySqlName + "?useSSL=false";
             }
             /* Check to see if we can create a connection */
-            if (dataStore.CreateConnection(this.mySqlConn, this.mySqlUser, this.mySqlPass) == null) {
+            if (dataStore.CanConnect(this.mySqlConn, this.mySqlUser, this.mySqlPass)) {
                 print("Could not create a connection with MySQL Server. PhantomBot now shutting down...");
                 PhantomBot.exitError();
             }
             /* Convert to MySql */
-            if (IniStore.instance().GetFileList().length > 0 && MySQLStore.instance().GetFileList().length == 0) {
+            if (IniStore.hasDatabase(dataStoreConfig) && IniStore.instance().GetFileList().length > 0 && MySQLStore.instance().GetFileList().length == 0) {
                 DataStoreConverter.convertDataStore(MySQLStore.instance(), IniStore.instance());
-            } else if (SqliteStore.instance().GetFileList().length > 0  && MySQLStore.instance().GetFileList().length == 0) {
+            } else if (SqliteStore.hasDatabase(dataStoreConfig) && SqliteStore.instance().GetFileList().length > 0  && MySQLStore.instance().GetFileList().length == 0) {
                 DataStoreConverter.convertDataStore(MySQLStore.instance(), SqliteStore.instance());
             }
         } else if (dataStoreType.equalsIgnoreCase("h2store")) {
-            dataStore = H2Store.instance();
+            dataStore = H2Store.instance(dataStoreConfig);
 
-            if (dataStore.CreateConnection("", "", "") == null) {
+            if (!dataStore.CanConnect()) {
                 print("Could not create a connection with H2 Database. PhantomBot now shutting down...");
                 PhantomBot.exitError();
             }
 
-            if (SqliteStore.instance().GetFileList().length > 0 && H2Store.instance().GetFileList().length == 0) {
+            if (SqliteStore.hasDatabase(dataStoreConfig) && SqliteStore.instance().GetFileList().length > 0 && H2Store.instance().GetFileList().length == 0) {
                 DataStoreConverter.convertDataStore(H2Store.instance(), SqliteStore.instance());
             }
         } else {
             dataStoreType = "sqlite3store";
-            dataStore = SqliteStore.instance();
+            dataStore = SqliteStore.instance(dataStoreConfig);
 
             /* Convert the inistore to sqlite if the inistore exists and the db is empty */
-            if (IniStore.instance().GetFileList().length > 0 && SqliteStore.instance().GetFileList().length == 0) {
+            if (IniStore.hasDatabase(dataStoreConfig) && IniStore.instance().GetFileList().length > 0 && SqliteStore.instance().GetFileList().length == 0) {
                 DataStoreConverter.convertDataStore(SqliteStore.instance(), IniStore.instance());
             }
 
@@ -1036,9 +1036,6 @@ public final class PhantomBot implements Listener {
         EventBus.instance().register(ConsoleEventHandler.instance());
         //EventBus.instance().register(tv.phantombot.scripts.core.Moderation.instance());
 
-        /* Load the datastore config */
-        dataStore.LoadConfig(dataStoreConfig);
-
         /* Export all these to the $. api in the scripts. */
         Script.global.defineProperty("inidb", dataStore, 0);
         Script.global.defineProperty("username", UsernameCache.instance(), 0);
@@ -1097,8 +1094,8 @@ public final class PhantomBot implements Listener {
         doCheckPhantomBotUpdate();
 
         /* Perform SQLite datbase backups. */
-        if (this.backupSQLiteAuto) {
-            doBackupSQLiteDB();
+        if (this.backupDBAuto) {
+            doBackupDB();
         }
     }
 
@@ -1190,7 +1187,7 @@ public final class PhantomBot implements Listener {
 
         com.gmt2001.Console.out.print("\r\n");
         print("Closing the database...");
-        dataStore.CloseConnection();
+        dataStore.dispose();
 
         print(this.botName + " is exiting.");
     }
@@ -1463,34 +1460,33 @@ public final class PhantomBot implements Listener {
     /**
      * Backup the database, keeping so many days.
      */
-    private void doBackupSQLiteDB() {
-
-        if (!dataStoreType.equals("sqlite3store")) {
+    private void doBackupDB() {
+        if (!this.dataStore.canBackup()) {
             return;
         }
-
+        
         ScheduledExecutorService service = Executors.newSingleThreadScheduledExecutor();
         service.scheduleAtFixedRate(() -> {
-            Thread.currentThread().setName("tv.phantombot.PhantomBot::doBackupSQLiteDB");
+            Thread.currentThread().setName("tv.phantombot.PhantomBot::doBackupDB");
 
             SimpleDateFormat datefmt = new SimpleDateFormat("ddMMyyyy.hhmmss");
             datefmt.setTimeZone(TimeZone.getTimeZone(timeZone));
             String timestamp = datefmt.format(new Date());
 
-            dataStore.backupSQLite3("phantombot.auto.backup." + timestamp + ".db");
+            dataStore.backupDB("phantombot.auto.backup." + timestamp + ".db");
 
             try {
                 Iterator<File> dirIterator = FileUtils.iterateFiles(new File("./dbbackup"), new WildcardFileFilter("phantombot.auto.*"), null);
                 while (dirIterator.hasNext()) {
                     File backupFile = dirIterator.next();
-                    if (FileUtils.isFileOlder(backupFile, (System.currentTimeMillis() - (long) (backupSQLiteKeepDays * 864e5)))) {
+                    if (FileUtils.isFileOlder(backupFile, (System.currentTimeMillis() - (long) (backupDBKeepDays * 864e5)))) {
                         FileUtils.deleteQuietly(backupFile);
                     }
                 }
             } catch (Exception ex) {
                 com.gmt2001.Console.err.println("Failed to clean up database backup directory: " + ex.getMessage());
             }
-        }, 0, backupSQLiteHourFrequency, TimeUnit.HOURS);
+        }, 0, backupDBHourFrequency, TimeUnit.HOURS);
     }
 
     /**

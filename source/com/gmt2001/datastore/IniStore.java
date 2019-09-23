@@ -22,6 +22,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.Collection;
@@ -34,7 +35,7 @@ import javax.swing.Timer;
 import org.apache.commons.io.FileUtils;
 
 /**
- *
+ * @deprecated
  * @author gmt2001
  */
 public class IniStore extends DataStore implements ActionListener {
@@ -45,15 +46,23 @@ public class IniStore extends DataStore implements ActionListener {
     private final Timer t;
     private final Timer t2;
     private static final long saveinterval = 5 * 60 * 1000;
-    private static final IniStore instance = new IniStore();
+    private static IniStore instance;
     private String inifolder = "";
 
     public static IniStore instance() {
+        return instance("");
+    }
+    
+    public static IniStore instance(String configStr) {
+        if (instance == null) {
+            instance = new IniStore(configStr);
+        }
+        
         return instance;
     }
 
-    private IniStore() {
-        inifolder = LoadConfigReal("");
+    private IniStore(String configStr) {
+        inifolder = LoadConfigReal(configStr);
 
         t = new Timer((int) saveinterval, this);
         t2 = new Timer(1, this);
@@ -236,10 +245,9 @@ public class IniStore extends DataStore implements ActionListener {
 
         LoadFile(fName, true);
     }
-
-    @Override
-    public void LoadConfig(String configStr) {
-        inifolder = LoadConfigReal(configStr);
+    
+    public static boolean hasDatabase(String configStr) {
+        return Files.exists(Paths.get(LoadConfigReal(configStr)), LinkOption.NOFOLLOW_LINKS);
     }
 
     private static String LoadConfigReal(String configStr) {
