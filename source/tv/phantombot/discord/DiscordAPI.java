@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2016-2018 phantombot.tv
+ * Copyright (C) 2016-2019 phantombot.tv
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -118,6 +118,7 @@ public class DiscordAPI extends DiscordUtil {
 
         DiscordAPI.client.login().doOnError(e -> {
             com.gmt2001.Console.err.println("Failed to authenticate with Discord: [" + e.getClass().getSimpleName() + "] " + e.getMessage());
+            com.gmt2001.Console.err.logStackTrace(e);
         }).subscribe();
     }
 
@@ -136,6 +137,7 @@ public class DiscordAPI extends DiscordUtil {
 
         DiscordAPI.client.login().doOnError(e -> {
             com.gmt2001.Console.err.println("Failed to reconnect with Discord: [" + e.getClass().getSimpleName() + "] " + e.getMessage());
+            com.gmt2001.Console.err.logStackTrace(e);
         }).subscribe();
 
         return isLoggedIn();
